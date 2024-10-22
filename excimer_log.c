@@ -142,6 +142,7 @@ void excimer_log_add(excimer_log *log, zend_execute_data *execute_data,
 {
 	uint32_t frame_index = excimer_log_find_or_add_frame(log, execute_data, 0);
 	excimer_log_entry *entry;
+	excimer_log_frame *frame;
 
 	log->entries = safe_erealloc(log->entries, log->entries_size + 1,
 		sizeof(excimer_log_entry), 0);
@@ -150,6 +151,14 @@ void excimer_log_add(excimer_log *log, zend_execute_data *execute_data,
 	entry->event_count = event_count;
 	log->event_count += event_count;
 	entry->timestamp = timestamp;
+
+	frame = &log->frames[frame_index];
+	if (!frame->memory_usage || frame->memory_usage < zend_memory_usage(false)) {
+		frame->memory_usage = zend_memory_usage(false);
+	}
+	if (!frame->memory_peak_usage || frame->memory_peak_usage < zend_memory_peak_usage(false)) {
+		frame->memory_peak_usage = zend_memory_peak_usage(false);
+	}
 }
 
 static uint32_t excimer_log_get_truncation_marker(excimer_log *log) {
@@ -207,6 +216,7 @@ static uint32_t excimer_log_find_or_add_frame(excimer_log *log,
 		smart_str ss_key = {NULL};
 		zend_string *str_key;
 		zval* zp_index;
+		zval *arg;
 
 		frame.filename = func->op_array.filename;
 		zend_string_addref(frame.filename);
@@ -234,6 +244,19 @@ static uint32_t excimer_log_find_or_add_frame(excimer_log *log,
 		excimer_log_smart_str_append_printf(&ss_key, "%d", frame.lineno);
 		smart_str_appendc(&ss_key, '\0');
 		excimer_log_smart_str_append_printf(&ss_key, "%d", frame.prev_index);
+
+		if (frame.function_name
+			&& (zend_string_equals_literal(frame.function_name, "do_action")
+				|| zend_string_equals_literal(frame.function_name, "apply_filters"))
+			&& ZEND_CALL_NUM_ARGS(execute_data) > 0) {
+			arg = ZEND_CALL_ARG(execute_data, 1);
+			if (Z_TYPE_P(arg) == IS_STRING) {
+				frame.metadata = zend_string_init(Z_STRVAL_P(arg), Z_STRLEN_P(arg), 0);
+				smart_str_appendc(&ss_key, '#');
+				smart_str_append(&ss_key, frame.metadata);
+			}
+		}
+
 		str_key = excimer_log_smart_str_extract(&ss_key);
 
 		/* Look for a matching frame in the reverse hashtable */
@@ -588,6 +611,27 @@ HashTable *excimer_log_frame_to_array(excimer_log_frame *frame) {
 		zend_string_delref(s);
 	}
 
+	if (frame->metadata) {
+		zend_string *s_metadata = zend_string_init("metadata", sizeof("metadata")-1, 0);
+		ZVAL_STR_COPY(&tmp, frame->metadata);
+		zend_hash_add_new(ht_func, s_metadata, &tmp);
+		zend_string_delref(s_metadata);
+	}
+
+	if (frame->memory_usage) {
+		zend_string *s_memory_usage = zend_string_init("memory_usage", sizeof("memory_usage")-1, 0);
+		ZVAL_LONG(&tmp, frame->memory_usage);
+		zend_hash_add_new(ht_func, s_memory_usage, &tmp);
+		zend_string_delref(s_memory_usage);
+	}
+
+	if (frame->memory_peak_usage) {
+		zend_string *s_memory_peak_usage = zend_string_init("memory_peak_usage", sizeof("memory_peak_usage")-1, 0);
+		ZVAL_LONG(&tmp, frame->memory_peak_usage);
+		zend_hash_add_new(ht_func, s_memory_peak_usage, &tmp);
+		zend_string_delref(s_memory_peak_usage);
+	}
+
 	return ht_func;
 }
 
@@ -683,6 +727,12 @@ HashTable *excimer_log_aggr_by_func(excimer_log *log)
 				}
 				smart_str_append(&ss_name, frame->function_name);
 			}
+
+			if (frame->metadata) {
+				smart_str_appendc(&ss_name, '#');
+				smart_str_append(&ss_name, frame->metadata);
+			}
+
 			sp_name = excimer_log_smart_str_extract(&ss_name);
 
 			/* If it is not in ht_result, add it, along with frame info */

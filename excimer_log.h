@@ -41,6 +41,15 @@ typedef struct _excimer_log_frame {
 	 */
 	zend_string *function_name;
 
+	/** Additional metadata about the function call. */
+	zend_string *metadata;
+
+	/** Memory usage. */
+	zend_long memory_usage;
+
+	/** Memory peak usage. */
+	zend_long memory_peak_usage;
+
 	/**
 	 * The index within excimer_log.frames of the calling frame.
 	 */
